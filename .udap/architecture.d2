@@ -1,0 +1,14 @@
+# udap:meta cloud=aws region=us-east-1 target=ec2
+
+vpc: Default VPC (172.31.0.0/16) {
+  ec2: Vault EC2 Instance (t3.small) { shape: rectangle; udap-type: aws.ec2 }
+  sg: Security Group { shape: rectangle; udap-type: generic.app }
+  eip: Elastic IP { shape: rectangle; udap-type: generic.app }
+}
+user: Browser / Operator { shape: person; udap-type: generic.user }
+s3: TF State Bucket { shape: rectangle; udap-type: aws.s3 }
+
+user -> vpc.eip: HTTP :8200 (Vault UI / API)
+vpc.eip -> vpc.ec2: forwards to instance
+vpc.sg -> vpc.ec2: controls inbound :8200 + :22
+vpc.ec2 -> s3: terraform remote state

@@ -1,0 +1,122 @@
+version: 1
+name: vault
+vcs: github
+
+stages:
+  - id: provision
+    kind: provision
+    timeout_minutes: 20
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: us-east-1
+      TF_VAR_project_name: ${{ secrets.PROJECT_NAME }}
+      TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+      TF_VAR_my_ip: ${{ secrets.MY_IP }}
+    steps:
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.7.5
+      - name: Terraform Init
+        working-directory: infra
+        run: |
+          terraform init -input=false -reconfigure \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate" \
+            -backend-config="region=us-east-1"
+      - name: Terraform Apply
+        working-directory: infra
+        run: terraform apply -input=false -auto-approve
+      - name: Get Outputs
+        id: tf_outputs
+        working-directory: infra
+        run: |
+          echo "instance_ip=$(terraform output -raw instance_public_ip)" >> "$GITHUB_OUTPUT"
+          echo "instance_id=$(terraform output -raw instance_id)" >> "$GITHUB_OUTPUT"
+    outputs:
+      instance_ip: ${{ steps.tf_outputs.outputs.instance_ip }}
+      instance_id: ${{ steps.tf_outputs.outputs.instance_id }}
+
+  - id: configure
+    kind: configure
+    needs: [provision]
+    timeout_minutes: 20
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: us-east-1
+      TF_VAR_project_name: ${{ secrets.PROJECT_NAME }}
+      TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+      TF_VAR_my_ip: ${{ secrets.MY_IP }}
+    steps:
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.7.5
+      - name: Read instance IP from state
+        id: tf_ip
+        working-directory: infra
+        run: |
+          terraform init -input=false -reconfigure \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate" \
+            -backend-config="region=us-east-1"
+          echo "instance_ip=$(terraform output -raw instance_public_ip)" >> "$GITHUB_OUTPUT"
+      - name: Install Ansible
+        run: pip install ansible-core
+      - name: Write SSH private key
+        env:
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+      - name: Scan host key
+        run: ssh-keyscan -H "${{ steps.tf_ip.outputs.instance_ip }}" >> ~/.ssh/known_hosts
+      - name: Generate inventory
+        run: |
+          cat > /tmp/inventory.ini <<EOF
+          [vault]
+          ${{ steps.tf_ip.outputs.instance_ip }} ansible_user=${{ secrets.SSH_USER }} ansible_ssh_private_key_file=~/.ssh/deploy_key
+          EOF
+      - name: Run Ansible playbook
+        run: ansible-playbook -i /tmp/inventory.ini ansible/site.yml
+
+  - id: verify
+    kind: verify
+    needs: [provision, configure]
+    timeout_minutes: 10
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: us-east-1
+      TF_VAR_project_name: ${{ secrets.PROJECT_NAME }}
+      TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+      TF_VAR_my_ip: ${{ secrets.MY_IP }}
+    steps:
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.7.5
+      - name: Read instance IP from state
+        id: tf_ip
+        working-directory: infra
+        run: |
+          terraform init -input=false -reconfigure \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate" \
+            -backend-config="region=us-east-1"
+          echo "instance_ip=$(terraform output -raw instance_public_ip)" >> "$GITHUB_OUTPUT"
+      - name: Wait for Vault to be reachable
+        run: |
+          curl --fail \
+            --retry 15 \
+            --retry-delay 15 \
+            --retry-all-errors \
+            "http://${{ steps.tf_ip.outputs.instance_ip }}:8200/v1/sys/health?standbyok=true&uninitcode=200&sealedcode=200"
+      - name: Print Vault UI URL
+        run: echo "Vault UI -> http://${{ steps.tf_ip.outputs.instance_ip }}:8200/ui"
+
+rollback:
+  strategy: manual

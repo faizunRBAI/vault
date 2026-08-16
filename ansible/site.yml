@@ -1,0 +1,137 @@
+---
+- name: Install and configure HashiCorp Vault
+  hosts: vault
+  become: true
+  gather_facts: true
+
+  vars:
+    vault_version: "1.16.2"
+    vault_config_dir: /etc/vault.d
+    vault_data_dir: /opt/vault/data
+    vault_user: vault
+    vault_group: vault
+
+  tasks:
+    # ── Wait for SSH ──────────────────────────────────────────────────────────
+    - name: Wait for SSH to be available
+      ansible.builtin.wait_for:
+        port: 22
+        host: "{{ ansible_host }}"
+        delay: 5
+        timeout: 120
+      delegate_to: localhost
+      become: false
+
+    # ── System prerequisites ──────────────────────────────────────────────────
+    - name: Update apt cache (retry until cloud-init finishes)
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 0
+      register: apt_update
+      until: apt_update is succeeded
+      retries: 5
+      delay: 15
+
+    - name: Install prerequisite packages
+      ansible.builtin.apt:
+        name:
+          - gnupg
+          - curl
+          - unzip
+          - software-properties-common
+          - apt-transport-https
+        state: present
+
+    # ── HashiCorp APT repository ──────────────────────────────────────────────
+    - name: Download HashiCorp GPG key
+      ansible.builtin.shell:
+        cmd: curl -fsSL https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+        creates: /usr/share/keyrings/hashicorp-archive-keyring.gpg
+
+    - name: Add HashiCorp APT repository
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com {{ ansible_distribution_release }} main"
+        state: present
+        filename: hashicorp
+        update_cache: true
+
+    # ── Install Vault ─────────────────────────────────────────────────────────
+    - name: Install Vault
+      ansible.builtin.apt:
+        name: vault
+        state: present
+      register: vault_install
+      until: vault_install is succeeded
+      retries: 3
+      delay: 10
+
+    # ── Vault data directory ──────────────────────────────────────────────────
+    - name: Create Vault data directory
+      ansible.builtin.file:
+        path: "{{ vault_data_dir }}"
+        state: directory
+        owner: "{{ vault_user }}"
+        group: "{{ vault_group }}"
+        mode: "0750"
+
+    # ── Vault configuration ───────────────────────────────────────────────────
+    - name: Write Vault configuration file
+      ansible.builtin.copy:
+        dest: "{{ vault_config_dir }}/vault.hcl"
+        owner: "{{ vault_user }}"
+        group: "{{ vault_group }}"
+        mode: "0640"
+        content: |
+          # HashiCorp Vault — file storage backend, TLS disabled
+          # NOTE: TLS is disabled for direct HTTP access on port 8200.
+          # Enable TLS before using in production.
+
+          ui = true
+
+          listener "tcp" {
+            address     = "0.0.0.0:8200"
+            tls_disable = 1
+          }
+
+          storage "file" {
+            path = "{{ vault_data_dir }}"
+          }
+
+          api_addr = "http://0.0.0.0:8200"
+
+    # ── Systemd service ───────────────────────────────────────────────────────
+    - name: Enable and start Vault service
+      ansible.builtin.systemd:
+        name: vault
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Flush handlers
+      ansible.builtin.meta: flush_handlers
+
+    # ── Wait for Vault API ────────────────────────────────────────────────────
+    - name: Wait for Vault to listen on port 8200
+      ansible.builtin.wait_for:
+        port: 8200
+        host: 127.0.0.1
+        delay: 3
+        timeout: 60
+
+    # ── Vault status ──────────────────────────────────────────────────────────
+    - name: Print Vault service status
+      ansible.builtin.command:
+        cmd: systemctl status vault --no-pager
+      register: vault_status
+      changed_when: false
+
+    - name: Show Vault status output
+      ansible.builtin.debug:
+        var: vault_status.stdout_lines
+
+    - name: Print Vault server info
+      ansible.builtin.debug:
+        msg: |
+          Vault is running on port 8200.
+          UI available at: http://{{ ansible_host }}:8200/ui
+          Run 'vault operator init' to initialize (see README).
