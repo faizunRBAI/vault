@@ -77,6 +77,12 @@ jobs:
         '
       env:
         SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+    - name: Wait for SSH port 22
+      run: "HOST=\"${{ steps.tf_ip.outputs.instance_ip }}\"\nfor i in $(seq 1 30);\
+        \ do\n  if nc -zw5 \"$HOST\" 22; then\n    echo \"SSH port is open after $i\
+        \ attempt(s)\"\n    exit 0\n  fi\n  echo \"Attempt $i: SSH not ready, waiting\
+        \ 10s...\"\n  sleep 10\ndone\necho \"ERROR: SSH port 22 never became reachable\
+        \ on $HOST\"\nexit 1\n"
     - name: Scan host key
       run: ssh-keyscan -H "${{ steps.tf_ip.outputs.instance_ip }}" >> ~/.ssh/known_hosts
     - name: Generate inventory

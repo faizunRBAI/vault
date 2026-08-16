@@ -72,6 +72,19 @@ stages:
           mkdir -p ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
+      - name: Wait for SSH port 22
+        run: |
+          HOST="${{ steps.tf_ip.outputs.instance_ip }}"
+          for i in $(seq 1 30); do
+            if nc -zw5 "$HOST" 22; then
+              echo "SSH port is open after $i attempt(s)"
+              exit 0
+            fi
+            echo "Attempt $i: SSH not ready, waiting 10s..."
+            sleep 10
+          done
+          echo "ERROR: SSH port 22 never became reachable on $HOST"
+          exit 1
       - name: Scan host key
         run: ssh-keyscan -H "${{ steps.tf_ip.outputs.instance_ip }}" >> ~/.ssh/known_hosts
       - name: Generate inventory
