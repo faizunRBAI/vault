@@ -81,10 +81,11 @@ resource "aws_key_pair" "vault" {
 
 resource "aws_security_group" "vault" {
   name        = "${var.project_name}-vault-sg"
-  description = "Vault: port 8200 from operator IP; SSH for manual access only"
+  # Keep EXACT original description — changing it forces destroy+recreate while instance still attached
+  description = "Vault server: SSH and Vault API/UI from operator IP only"
   vpc_id      = data.aws_vpc.default.id
 
-  # SSH from operator IP (manual access only — CI uses SSM, not SSH)
+  # SSH from operator IP (manual access only — CI configure uses SSM, not SSH)
   ingress {
     description = "SSH from operator"
     from_port   = 22
@@ -133,6 +134,12 @@ resource "aws_instance" "vault" {
     volume_size           = 20
     volume_type           = "gp3"
     delete_on_termination = true
+  }
+
+  # Create the new instance (with IAM profile) before destroying the old one
+  # so the SG is never held only by the old instance during replacement
+  lifecycle {
+    create_before_destroy = true
   }
 
   tags = {
