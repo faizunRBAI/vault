@@ -5,23 +5,12 @@
   gather_facts: true
 
   vars:
-    vault_version: "1.16.2"
     vault_config_dir: /etc/vault.d
     vault_data_dir: /opt/vault/data
     vault_user: vault
     vault_group: vault
 
   tasks:
-    # ── Wait for SSH ──────────────────────────────────────────────────────────
-    - name: Wait for SSH to be available
-      ansible.builtin.wait_for:
-        port: 22
-        host: "{{ ansible_host }}"
-        delay: 5
-        timeout: 120
-      delegate_to: localhost
-      become: false
-
     # ── System prerequisites ──────────────────────────────────────────────────
     - name: Update apt cache (retry until cloud-init finishes)
       ansible.builtin.apt:
@@ -133,5 +122,5 @@
       ansible.builtin.debug:
         msg: |
           Vault is running on port 8200.
-          UI available at: http://{{ ansible_host }}:8200/ui
+          Access the UI from your browser at the Elastic IP on port 8200.
           Run 'vault operator init' to initialize (see README).

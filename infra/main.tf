@@ -27,6 +27,43 @@ data "aws_ami" "ubuntu" {
   }
 }
 
+# ── IAM Role for SSM (allows CI runner to configure via SSM, no SSH needed) ───
+
+resource "aws_iam_role" "vault_ssm" {
+  name = "${var.project_name}-vault-ssm-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
+      Principal = { Service = "ec2.amazonaws.com" }
+    }]
+  })
+
+  tags = {
+    Name      = "${var.project_name}-vault-ssm-role"
+    Project   = var.project_name
+    ManagedBy = "udap"
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "ssm_core" {
+  role       = aws_iam_role.vault_ssm.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_instance_profile" "vault_ssm" {
+  name = "${var.project_name}-vault-ssm-profile"
+  role = aws_iam_role.vault_ssm.name
+
+  tags = {
+    Name      = "${var.project_name}-vault-ssm-profile"
+    Project   = var.project_name
+    ManagedBy = "udap"
+  }
+}
+
 # ── SSH Key Pair ───────────────────────────────────────────────────────────────
 
 resource "aws_key_pair" "vault" {
@@ -44,10 +81,10 @@ resource "aws_key_pair" "vault" {
 
 resource "aws_security_group" "vault" {
   name        = "${var.project_name}-vault-sg"
-  description = "Vault server: SSH and Vault API/UI from operator IP only"
+  description = "Vault: port 8200 from operator IP; SSH for manual access only"
   vpc_id      = data.aws_vpc.default.id
 
-  # SSH from operator IP
+  # SSH from operator IP (manual access only — CI uses SSM, not SSH)
   ingress {
     description = "SSH from operator"
     from_port   = 22
@@ -65,7 +102,7 @@ resource "aws_security_group" "vault" {
     cidr_blocks = [var.my_ip]
   }
 
-  # Allow all outbound (package installs, HashiCorp repo, etc.)
+  # Allow all outbound (SSM agent, package installs, HashiCorp repo, etc.)
   egress {
     from_port   = 0
     to_port     = 0
@@ -89,6 +126,7 @@ resource "aws_instance" "vault" {
   subnet_id                   = data.aws_subnets.public.ids[0]
   vpc_security_group_ids      = [aws_security_group.vault.id]
   key_name                    = aws_key_pair.vault.key_name
+  iam_instance_profile        = aws_iam_instance_profile.vault_ssm.name
   associate_public_ip_address = true
 
   root_block_device {

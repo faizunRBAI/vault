@@ -4,11 +4,16 @@ vpc: Default VPC (172.31.0.0/16) {
   ec2: Vault EC2 Instance (t3.small) { shape: rectangle; udap-type: aws.ec2 }
   sg: Security Group { shape: rectangle; udap-type: generic.app }
   eip: Elastic IP { shape: rectangle; udap-type: generic.app }
+  iam: IAM Instance Profile (SSM) { shape: rectangle; udap-type: generic.app }
 }
 user: Browser / Operator { shape: person; udap-type: generic.user }
 s3: TF State Bucket { shape: rectangle; udap-type: aws.s3 }
+ssm: AWS SSM { shape: rectangle; udap-type: generic.app }
 
 user -> vpc.eip: HTTP :8200 (Vault UI / API)
 vpc.eip -> vpc.ec2: forwards to instance
 vpc.sg -> vpc.ec2: controls inbound :8200 + :22
+vpc.iam -> vpc.ec2: grants SSM access
+vpc.ec2 -> ssm: SSM agent heartbeat
+ssm -> vpc.ec2: CI configure via SSM (no SSH)
 vpc.ec2 -> s3: terraform remote state

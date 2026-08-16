@@ -41,7 +41,7 @@ stages:
   - id: configure
     kind: configure
     needs: [provision]
-    timeout_minutes: 20
+    timeout_minutes: 25
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -54,46 +54,56 @@ stages:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.7.5
-      - name: Read instance IP from state
-        id: tf_ip
+      - name: Read instance ID from state
+        id: tf_out
         working-directory: infra
         run: |
           terraform init -input=false -reconfigure \
             -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
             -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate" \
             -backend-config="region=us-east-1"
+          echo "instance_id=$(terraform output -raw instance_id)" >> "$GITHUB_OUTPUT"
           echo "instance_ip=$(terraform output -raw instance_public_ip)" >> "$GITHUB_OUTPUT"
-      - name: Install Ansible
-        run: pip install ansible-core
-      - name: Write SSH private key
-        env:
-          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+      - name: Install Ansible and AWS SSM dependencies
         run: |
-          mkdir -p ~/.ssh
-          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-      - name: Wait for SSH port 22
+          pip install ansible-core boto3 botocore
+          ansible-galaxy collection install community.aws amazon.aws
+      - name: Install AWS Session Manager plugin
         run: |
-          HOST="${{ steps.tf_ip.outputs.instance_ip }}"
-          for i in $(seq 1 30); do
-            if nc -zw5 "$HOST" 22; then
-              echo "SSH port is open after $i attempt(s)"
+          curl -fsSL "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb" -o /tmp/smp.deb
+          sudo dpkg -i /tmp/smp.deb
+      - name: Wait for SSM agent to register
+        run: |
+          INSTANCE_ID="${{ steps.tf_out.outputs.instance_id }}"
+          for i in $(seq 1 40); do
+            STATUS=$(aws ssm describe-instance-information \
+              --filters "Key=InstanceIds,Values=$INSTANCE_ID" \
+              --query "InstanceInformationList[0].PingStatus" \
+              --output text 2>/dev/null || echo "None")
+            if [ "$STATUS" = "Online" ]; then
+              echo "SSM agent is Online after $i attempt(s)"
               exit 0
             fi
-            echo "Attempt $i: SSH not ready, waiting 10s..."
-            sleep 10
+            echo "Attempt $i: SSM status=$STATUS, waiting 15s..."
+            sleep 15
           done
-          echo "ERROR: SSH port 22 never became reachable on $HOST"
+          echo "ERROR: SSM agent never came online for $INSTANCE_ID"
           exit 1
-      - name: Scan host key
-        run: ssh-keyscan -H "${{ steps.tf_ip.outputs.instance_ip }}" >> ~/.ssh/known_hosts
-      - name: Generate inventory
+      - name: Generate SSM inventory
         run: |
+          INSTANCE_ID="${{ steps.tf_out.outputs.instance_id }}"
           cat > /tmp/inventory.ini <<EOF
           [vault]
-          ${{ steps.tf_ip.outputs.instance_ip }} ansible_user=${{ secrets.SSH_USER }} ansible_ssh_private_key_file=~/.ssh/deploy_key
+          $INSTANCE_ID
+
+          [vault:vars]
+          ansible_connection=community.aws.aws_ssm
+          ansible_aws_ssm_bucket_name=${{ secrets.TF_STATE_BUCKET }}
+          ansible_aws_ssm_region=us-east-1
+          ansible_python_interpreter=/usr/bin/python3
+          ansible_remote_tmp=/tmp/.ansible-ssm
           EOF
-      - name: Run Ansible playbook
+      - name: Run Ansible playbook via SSM
         run: ansible-playbook -i /tmp/inventory.ini ansible/site.yml
 
   - id: verify
